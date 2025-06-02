@@ -1,0 +1,1374 @@
+# DuckLake: Comprehensive Documentation
+
+## Table of Contents
+1. [Overview](#overview)
+2. [Architecture](#architecture)
+3. [Installation and Setup](#installation-and-setup)
+4. [SQL Reference](#sql-reference)
+5. [Table Functions](#table-functions)
+6. [Configuration Options](#configuration-options)
+7. [Data Types](#data-types)
+8. [Transactions and Concurrency](#transactions-and-concurrency)
+9. [Schema Evolution](#schema-evolution)
+10. [Time Travel](#time-travel)
+11. [Partitioning](#partitioning)
+12. [Change Data Feed](#change-data-feed)
+13. [Performance Optimization](#performance-optimization)
+14. [Troubleshooting](#troubleshooting)
+15. [Code Examples](#code-examples)
+
+## Overview
+
+DuckLake is an open Lakehouse format built on SQL and Parquet. It is implemented as a DuckDB extension that provides:
+
+- **ACID Transactions**: Full transactional guarantees for data lake operations
+- **Time Travel**: Query historical data at any point in time
+- **Schema Evolution**: Evolve schemas without rewriting data
+- **Change Data Feed**: Track insertions, updates, and deletions
+- **Partitioning**: Hive-style partitioning for performance
+- **Compaction**: Automatic small file merging
+- **SQL Interface**: Standard SQL for all operations
+
+DuckLake stores metadata in a catalog database (DuckDB format by default) and data in Parquet files, combining the flexibility of data lakes with the reliability of data warehouses.
+
+## Architecture
+
+### Core Components
+
+1. **Storage Extension**
+   - `DuckLakeStorageExtension`: Main extension class
+   - Registers DuckLake as a storage backend in DuckDB
+   - Manages metadata and data paths separately
+
+2. **Catalog System**
+   - `DuckLakeCatalog`: Central catalog managing schemas, tables, and views
+   - `DuckLakeCatalogSet`: Collection of catalog entries per snapshot
+   - `DuckLakeSchemaEntry`: Schema definitions
+   - `DuckLakeTableEntry`: Table metadata including columns, partitions, and field IDs
+   - `DuckLakeViewEntry`: View definitions
+
+3. **Transaction Management**
+   - `DuckLakeTransactionManager`: Manages ACID transactions
+   - `DuckLakeTransaction`: Individual transaction state
+   - Supports isolation levels and conflict detection
+   - Enables concurrent reads and writes
+
+4. **Metadata Management**
+   - `DuckLakeMetadataManager`: Interface to the metadata catalog
+   - Stores snapshots, file lists, statistics, and schema information
+   - Manages versioned metadata for time travel
+
+### File Organization
+
+```
+data_path/
+├── table_name/
+│   ├── data_0000000000.parquet
+│   ├── data_0000000001.parquet
+│   └── partition_key=value/
+│       └── data_0000000002.parquet
+└── .delete/
+    └── delete_0000000000.parquet
+```
+
+### Metadata Tables
+
+- `ducklake_metadata`: General metadata and configuration
+- `ducklake_snapshot`: Transaction snapshots
+- `ducklake_snapshot_changes`: Changes made in each snapshot
+- `ducklake_schema`: Schema definitions
+- `ducklake_table`: Table metadata
+- `ducklake_view`: View definitions
+- `ducklake_column`: Column definitions with field IDs
+- `ducklake_data_file`: Data file registry
+- `ducklake_delete_file`: Delete file tracking
+- `ducklake_file_column_statistics`: Column statistics per file
+- `ducklake_table_stats`: Global table statistics
+- `ducklake_table_column_stats`: Global column statistics
+- `ducklake_partition_info`: Partition definitions
+- `ducklake_partition_column`: Partition column mappings
+- `ducklake_file_partition_value`: Partition values per file
+- `ducklake_tag`: Object tags and comments
+- `ducklake_column_tag`: Column-level tags
+- `ducklake_inlined_data_tables`: Small tables stored inline
+- `ducklake_files_scheduled_for_deletion`: Cleanup tracking
+
+## Installation and Setup
+
+### Building from Source
+
+```bash
+# Clone the repository
+git clone https://github.com/duckdb/ducklake.git
+cd ducklake
+
+# Pull DuckDB submodule
+make pull
+
+# Build the extension
+make
+
+# Or build with multiple cores
+make GEN=ninja release
+```
+
+### Loading the Extension
+
+```sql
+-- In DuckDB shell
+INSTALL ducklake;
+LOAD ducklake;
+```
+
+## SQL Reference
+
+### Database Attachment
+
+#### Basic Syntax
+```sql
+ATTACH 'ducklake:<database_path>' AS <alias_name>;
+```
+
+#### With Options
+```sql
+ATTACH 'ducklake:<database_path>' AS <alias_name> (
+    DATA_PATH '<data_directory>',
+    METADATA_CATALOG '<catalog_name>',
+    METADATA_SCHEMA '<schema_name>',
+    ENCRYPTED,
+    READ_ONLY,
+    SNAPSHOT_VERSION <version_number>,
+    SNAPSHOT_TIME '<timestamp>'
+);
+```
+
+#### Configuration Options
+
+- **DATA_PATH**: Directory where Parquet data files are stored
+- **METADATA_CATALOG**: Custom catalog name for metadata database
+- **METADATA_SCHEMA**: Schema name for metadata tables within the catalog
+- **META_TYPE**: Metadata storage type (default: 'DUCKDB')
+- **ENCRYPTED**: Enable encryption for data files
+- **READ_ONLY**: Open database in read-only mode
+- **SNAPSHOT_VERSION**: Attach at a specific snapshot version (read-only)
+- **SNAPSHOT_TIME**: Attach at a specific timestamp (read-only)
+
+### DDL Statements
+
+#### CREATE TABLE
+```sql
+-- Basic table creation
+CREATE TABLE ducklake.my_table (
+    id INTEGER NOT NULL,
+    name VARCHAR,
+    created_date DATE
+);
+
+-- Create table as select
+CREATE TABLE ducklake.new_table AS 
+SELECT * FROM source_table;
+
+-- With default values
+CREATE TABLE ducklake.users (
+    id INTEGER NOT NULL,
+    name VARCHAR,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    active BOOLEAN DEFAULT true
+);
+```
+
+#### ALTER TABLE
+
+**Add Column**:
+```sql
+ALTER TABLE ducklake.my_table ADD COLUMN new_col INTEGER;
+ALTER TABLE ducklake.my_table ADD COLUMN IF NOT EXISTS new_col INTEGER DEFAULT 0;
+```
+
+**Drop Column**:
+```sql
+ALTER TABLE ducklake.my_table DROP COLUMN column_name;
+ALTER TABLE ducklake.my_table DROP COLUMN IF EXISTS column_name;
+```
+
+**Rename Column**:
+```sql
+ALTER TABLE ducklake.my_table RENAME COLUMN old_name TO new_name;
+```
+
+**Rename Table**:
+```sql
+ALTER TABLE ducklake.old_table RENAME TO new_table;
+```
+
+**Set Partitioning**:
+```sql
+ALTER TABLE ducklake.my_table SET PARTITIONED BY (year, month);
+```
+
+**Type Promotion**:
+```sql
+-- Supported type promotions: INT -> BIGINT, FLOAT -> DOUBLE, etc.
+ALTER TABLE ducklake.my_table ALTER COLUMN id TYPE BIGINT;
+```
+
+#### Comments
+```sql
+COMMENT ON TABLE ducklake.my_table IS 'Main data table';
+COMMENT ON COLUMN ducklake.my_table.id IS 'Primary key';
+```
+
+### DML Statements
+
+#### INSERT
+```sql
+-- Single row insert
+INSERT INTO ducklake.my_table VALUES (1, 'test', '2024-01-01');
+
+-- Multiple rows
+INSERT INTO ducklake.my_table VALUES 
+    (1, 'test1', '2024-01-01'),
+    (2, 'test2', '2024-01-02');
+
+-- Insert with column list
+INSERT INTO ducklake.my_table (id, name) VALUES (1, 'test');
+
+-- Insert from select
+INSERT INTO ducklake.my_table 
+SELECT * FROM source_table WHERE condition;
+```
+
+#### UPDATE
+```sql
+-- Simple update
+UPDATE ducklake.my_table SET name = 'updated' WHERE id = 1;
+
+-- Update with expression
+UPDATE ducklake.my_table SET id = id + 100 WHERE id < 10;
+
+-- Update with join
+UPDATE ducklake.my_table t1
+SET name = t2.new_name
+FROM updates t2
+WHERE t1.id = t2.id;
+```
+
+#### DELETE
+```sql
+-- Simple delete
+DELETE FROM ducklake.my_table WHERE id = 1;
+
+-- Delete with subquery
+DELETE FROM ducklake.my_table 
+WHERE id IN (SELECT id FROM to_delete);
+
+-- Delete with join
+DELETE FROM ducklake.my_table t1
+USING deletes t2
+WHERE t1.id = t2.id;
+```
+
+#### TRUNCATE
+```sql
+TRUNCATE TABLE ducklake.my_table;
+```
+
+### Schema Management
+
+```sql
+-- Create schema
+CREATE SCHEMA ducklake.my_schema;
+
+-- Drop schema
+DROP SCHEMA ducklake.my_schema;
+DROP SCHEMA ducklake.my_schema CASCADE;
+
+-- Use schema
+USE ducklake.my_schema;
+```
+
+### Views
+
+```sql
+-- Create view
+CREATE VIEW ducklake.my_view AS 
+SELECT * FROM ducklake.my_table WHERE active = true;
+
+-- Create view with column aliases
+CREATE VIEW ducklake.summary_view (total, category) AS 
+SELECT SUM(amount), category FROM ducklake.transactions GROUP BY category;
+
+-- Replace view
+CREATE OR REPLACE VIEW ducklake.my_view AS 
+SELECT * FROM ducklake.my_table;
+
+-- Drop view
+DROP VIEW ducklake.my_view;
+DROP VIEW IF EXISTS ducklake.my_view;
+```
+
+## Table Functions
+
+### ducklake_snapshots()
+View all snapshots in the database.
+
+**Signature**: `ducklake_snapshots(catalog_name VARCHAR)`
+
+**Returns**:
+- `snapshot_id` (BIGINT): Unique snapshot identifier
+- `snapshot_time` (TIMESTAMP_TZ): When the snapshot was created
+- `schema_version` (BIGINT): Schema version at this snapshot
+- `changes` (MAP): Map of changes made in this snapshot
+
+**Examples**:
+```sql
+-- View all snapshots
+SELECT * FROM ducklake_snapshots('ducklake');
+
+-- View recent snapshots
+SELECT * FROM ducklake_snapshots('ducklake') 
+WHERE snapshot_time > NOW() - INTERVAL '7 days'
+ORDER BY snapshot_id DESC;
+```
+
+### ducklake_table_info()
+Get detailed information about tables including file counts and sizes.
+
+**Signature**: `ducklake_table_info(catalog_name VARCHAR)`
+
+**Returns**:
+- `table_name` (VARCHAR): Full table name
+- `schema_id` (BIGINT): Schema identifier
+- `table_id` (BIGINT): Table identifier
+- `table_uuid` (UUID): Unique table UUID
+- `file_count` (BIGINT): Number of data files
+- `file_size_bytes` (BIGINT): Total size of data files
+- `delete_file_count` (BIGINT): Number of delete files
+- `delete_file_size_bytes` (BIGINT): Total size of delete files
+
+**Examples**:
+```sql
+-- View all table information
+SELECT * FROM ducklake_table_info('ducklake');
+
+-- Find large tables
+SELECT table_name, 
+       file_size_bytes / (1024.0 * 1024 * 1024) AS size_gb,
+       file_count
+FROM ducklake_table_info('ducklake')
+WHERE file_size_bytes > 1024 * 1024 * 1024  -- 1GB
+ORDER BY file_size_bytes DESC;
+```
+
+### ducklake_table_insertions()
+View insertions to a table between two snapshots.
+
+**Signature**: `ducklake_table_insertions(catalog, schema, table, start_snapshot, end_snapshot)`
+
+**Parameters**:
+- `start_snapshot`: BIGINT (version) or TIMESTAMP_TZ
+- `end_snapshot`: BIGINT (version) or TIMESTAMP_TZ
+
+**Examples**:
+```sql
+-- Using version numbers
+SELECT * FROM ducklake_table_insertions('ducklake', 'main', 'users', 0, 5);
+
+-- Using timestamps
+SELECT * FROM ducklake_table_insertions('ducklake', 'main', 'users', 
+    TIMESTAMP '2024-01-01', TIMESTAMP '2024-01-02');
+
+-- Count insertions per day
+SELECT DATE_TRUNC('day', snapshot_time) as day, COUNT(*) as insertions
+FROM ducklake_table_insertions('ducklake', 'main', 'users', 0, 100) t
+JOIN ducklake_snapshots('ducklake') s ON t.snapshot_id = s.snapshot_id
+GROUP BY day
+ORDER BY day;
+```
+
+### ducklake_table_deletions()
+View deletions from a table between two snapshots.
+
+**Signature**: Same as ducklake_table_insertions
+
+**Examples**:
+```sql
+-- View recent deletions
+SELECT * FROM ducklake_table_deletions('ducklake', 'main', 'users', 
+    NOW() - INTERVAL '1 day', NOW());
+```
+
+### ducklake_table_changes()
+View all changes (inserts, updates, deletes) between snapshots.
+
+**Signature**: `ducklake.table_changes(table_name, start_snapshot, end_snapshot)`
+
+**Returns**:
+- `snapshot_id` (BIGINT): Snapshot where change occurred
+- `rowid` (BIGINT): Row identifier
+- `change_type` (VARCHAR): One of 'insert', 'update_preimage', 'update_postimage', 'delete'
+- Plus all table columns
+
+**Examples**:
+```sql
+-- View all changes
+FROM ducklake.table_changes('users', 0, 10);
+
+-- View only updates (pre and post images)
+FROM ducklake.table_changes('users', 0, 10)
+WHERE change_type LIKE 'update%';
+
+-- Find changes to specific records
+FROM ducklake.table_changes('users', 0, 10)
+WHERE id = 123;
+```
+
+### ducklake_expire_snapshots()
+Remove old snapshots to save space.
+
+**Signature**: `ducklake_expire_snapshots(catalog, ...)`
+
+**Named Parameters**:
+- `older_than` (TIMESTAMP_TZ): Delete snapshots older than this timestamp
+- `versions` (LIST[BIGINT]): Delete specific snapshot versions
+- `dry_run` (BOOLEAN): Preview without deleting
+
+**Examples**:
+```sql
+-- Delete snapshots older than 30 days
+CALL ducklake_expire_snapshots('ducklake', 
+    older_than => NOW() - INTERVAL '30 days');
+
+-- Delete specific versions
+CALL ducklake_expire_snapshots('ducklake', 
+    versions => [2, 3, 4]);
+
+-- Dry run to see what would be deleted
+SELECT * FROM ducklake_expire_snapshots('ducklake', 
+    older_than => NOW() - INTERVAL '30 days', 
+    dry_run => true);
+
+-- Keep only last 100 snapshots
+WITH snapshots_to_delete AS (
+    SELECT snapshot_id 
+    FROM ducklake_snapshots('ducklake')
+    ORDER BY snapshot_id DESC
+    OFFSET 100
+)
+CALL ducklake_expire_snapshots('ducklake', 
+    versions => LIST(snapshots_to_delete));
+```
+
+### ducklake_cleanup_old_files()
+Remove orphaned data files after snapshot expiration.
+
+**Signature**: `ducklake_cleanup_old_files(catalog, ...)`
+
+**Named Parameters**:
+- `older_than` (TIMESTAMP_TZ): Cleanup files scheduled before this timestamp
+- `cleanup_all` (BOOLEAN): Cleanup all scheduled files
+- `dry_run` (BOOLEAN): Preview without deleting
+
+**Examples**:
+```sql
+-- Cleanup all orphaned files
+CALL ducklake_cleanup_old_files('ducklake', cleanup_all => true);
+
+-- Cleanup files older than 7 days
+CALL ducklake_cleanup_old_files('ducklake', 
+    older_than => NOW() - INTERVAL '7 days');
+
+-- Dry run to see what would be deleted
+SELECT * FROM ducklake_cleanup_old_files('ducklake', 
+    cleanup_all => true, 
+    dry_run => true);
+```
+
+### ducklake_merge_adjacent_files()
+Compact small adjacent files into larger files for better performance.
+
+**Signature**: `ducklake_merge_adjacent_files(catalog)`
+
+**Examples**:
+```sql
+-- Trigger manual compaction
+SELECT * FROM ducklake_merge_adjacent_files('ducklake');
+
+-- Compact specific tables by using transactions
+BEGIN;
+-- Force write to specific table to trigger compaction
+UPDATE ducklake.my_table SET id = id WHERE false;
+SELECT * FROM ducklake_merge_adjacent_files('ducklake');
+COMMIT;
+```
+
+## Configuration Options
+
+### Attachment Options
+
+```sql
+-- Basic attachment
+ATTACH 'ducklake:/path/to/metadata.db' AS lake;
+
+-- With separate data path
+ATTACH 'ducklake:/path/to/metadata.db' AS lake (
+    DATA_PATH '/path/to/data/'
+);
+
+-- With encryption
+ATTACH 'ducklake:/path/to/metadata.db' AS lake (
+    DATA_PATH '/path/to/data/',
+    ENCRYPTED
+);
+
+-- Read-only mode
+ATTACH 'ducklake:/path/to/metadata.db' AS lake (
+    DATA_PATH '/path/to/data/',
+    READ_ONLY
+);
+
+-- Time travel attachment
+ATTACH 'ducklake:/path/to/metadata.db' AS lake_v5 (
+    DATA_PATH '/path/to/data/',
+    SNAPSHOT_VERSION 5
+);
+
+-- Attach at timestamp
+ATTACH 'ducklake:/path/to/metadata.db' AS lake_historical (
+    DATA_PATH '/path/to/data/',
+    SNAPSHOT_TIME '2024-01-01 00:00:00'
+);
+
+-- Custom metadata catalog and schema
+ATTACH 'ducklake:/path/to/metadata.db' AS lake (
+    DATA_PATH '/path/to/data/',
+    METADATA_CATALOG 'custom_catalog',
+    METADATA_SCHEMA 'custom_schema'
+);
+
+-- Using PostgreSQL as metadata catalog
+ATTACH 'ducklake:postgres://user:pass@host/db' AS lake (
+    DATA_PATH '/path/to/data/',
+    METADATA_CATALOG 'ducklake_metadata',
+    METADATA_SCHEMA 'ducklake_schema'
+);
+```
+
+### Environment Variables
+
+```bash
+# Set default data path
+export DUCKLAKE_DATA_PATH=/path/to/data
+
+# Enable debug logging
+export DUCKLAKE_DEBUG=1
+```
+
+### Runtime Configuration
+
+```sql
+-- Set configuration for session
+SET ducklake_compact_threshold = 10;
+SET ducklake_inline_data_threshold = 1000;
+```
+
+## Data Types
+
+### Supported Types
+
+DuckLake supports all DuckDB data types:
+
+**Basic Types**:
+- INTEGER, BIGINT, SMALLINT, TINYINT, HUGEINT
+- FLOAT, DOUBLE
+- DECIMAL(precision, scale)
+- VARCHAR, CHAR(n)
+- BOOLEAN
+- DATE, TIME, TIMESTAMP, TIMESTAMP WITH TIME ZONE
+- INTERVAL
+- UUID
+- BLOB
+
+**Complex Types**:
+- STRUCT: `STRUCT(field1 TYPE1, field2 TYPE2, ...)`
+- LIST: `LIST(element_type)`
+- MAP: `MAP(key_type, value_type)`
+- UNION: `UNION(tag1 TYPE1, tag2 TYPE2, ...)`
+
+**Special Types**:
+- JSON
+- ENUM
+
+### Type Examples
+
+```sql
+-- Table with various types
+CREATE TABLE ducklake.complex_types (
+    -- Basic types
+    id INTEGER NOT NULL,
+    name VARCHAR,
+    score DOUBLE,
+    is_active BOOLEAN,
+    
+    -- Temporal types
+    created_date DATE,
+    created_time TIME,
+    created_at TIMESTAMP,
+    created_tz TIMESTAMP WITH TIME ZONE,
+    
+    -- Complex types
+    metadata STRUCT(key VARCHAR, value VARCHAR),
+    tags LIST(VARCHAR),
+    properties MAP(VARCHAR, VARCHAR),
+    
+    -- Nested complex types
+    nested STRUCT(
+        items LIST(STRUCT(id INT, name VARCHAR)),
+        counts MAP(VARCHAR, BIGINT)
+    ),
+    
+    -- Special types
+    unique_id UUID,
+    data BLOB,
+    config JSON
+);
+```
+
+### Type Evolution
+
+DuckLake supports safe type promotions:
+
+```sql
+-- INT to BIGINT
+ALTER TABLE ducklake.my_table ALTER COLUMN count TYPE BIGINT;
+
+-- FLOAT to DOUBLE
+ALTER TABLE ducklake.my_table ALTER COLUMN price TYPE DOUBLE;
+
+-- VARCHAR length changes (automatic)
+-- No action needed, VARCHAR is variable length
+```
+
+## Transactions and Concurrency
+
+### Transaction Basics
+
+```sql
+-- Start transaction
+BEGIN;
+
+-- Perform operations
+INSERT INTO ducklake.orders VALUES (1, 'Order 1', 100.00);
+UPDATE ducklake.inventory SET quantity = quantity - 1 WHERE product_id = 123;
+DELETE FROM ducklake.temp_data WHERE created < NOW() - INTERVAL '1 hour';
+
+-- Commit transaction
+COMMIT;
+
+-- Or rollback
+ROLLBACK;
+```
+
+### Isolation Levels
+
+DuckLake uses snapshot isolation by default:
+
+```sql
+-- Read committed (not recommended for DuckLake)
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+
+-- Snapshot isolation (default and recommended)
+SET TRANSACTION ISOLATION LEVEL SNAPSHOT;
+
+BEGIN;
+-- Your transaction sees a consistent snapshot
+-- Other transactions' commits are not visible
+COMMIT;
+```
+
+### Conflict Detection
+
+DuckLake detects and prevents conflicts:
+
+```sql
+-- Session 1
+BEGIN;
+UPDATE ducklake.accounts SET balance = balance + 100 WHERE id = 1;
+
+-- Session 2 (concurrent)
+BEGIN;
+UPDATE ducklake.accounts SET balance = balance - 50 WHERE id = 1;
+COMMIT; -- This will fail with conflict error
+
+-- Session 1
+COMMIT; -- This succeeds
+```
+
+### Long-Running Transactions
+
+```sql
+-- For long-running read operations
+BEGIN READ ONLY;
+-- Perform complex analytics queries
+-- No write operations allowed
+-- No conflict checking needed
+COMMIT;
+```
+
+## Schema Evolution
+
+### Adding Columns
+
+```sql
+-- Add column with NULL default
+ALTER TABLE ducklake.users ADD COLUMN email VARCHAR;
+
+-- Add column with default value
+ALTER TABLE ducklake.users ADD COLUMN status VARCHAR DEFAULT 'active';
+
+-- Add column with NOT NULL constraint
+ALTER TABLE ducklake.users ADD COLUMN created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP;
+
+-- Add column if not exists
+ALTER TABLE ducklake.users ADD COLUMN IF NOT EXISTS phone VARCHAR;
+```
+
+### Dropping Columns
+
+```sql
+-- Drop single column
+ALTER TABLE ducklake.users DROP COLUMN phone;
+
+-- Drop column if exists
+ALTER TABLE ducklake.users DROP COLUMN IF EXISTS phone;
+
+-- Drop multiple columns (one at a time)
+ALTER TABLE ducklake.users DROP COLUMN col1;
+ALTER TABLE ducklake.users DROP COLUMN col2;
+```
+
+### Renaming Columns
+
+```sql
+-- Rename column
+ALTER TABLE ducklake.users RENAME COLUMN username TO user_name;
+
+-- Rename preserves all data and statistics
+```
+
+### Struct Evolution
+
+```sql
+-- Original table with struct
+CREATE TABLE ducklake.events (
+    id INTEGER,
+    data STRUCT(user_id INT, action VARCHAR)
+);
+
+-- Add field to struct
+ALTER TABLE ducklake.events 
+ALTER COLUMN data ADD FIELD timestamp TIMESTAMP;
+
+-- Drop field from struct
+ALTER TABLE ducklake.events 
+ALTER COLUMN data DROP FIELD action;
+
+-- Rename field in struct
+ALTER TABLE ducklake.events 
+ALTER COLUMN data RENAME FIELD user_id TO userId;
+```
+
+### Field IDs
+
+DuckLake uses field IDs to track column identity across schema changes:
+
+```sql
+-- View field mappings
+SELECT * FROM ducklake.ducklake_column 
+WHERE table_id = (
+    SELECT table_id FROM ducklake.ducklake_table 
+    WHERE table_name = 'users'
+);
+```
+
+## Time Travel
+
+### Query Historical Data
+
+```sql
+-- Query table at specific version
+SELECT * FROM ducklake.orders AT (VERSION => 5);
+
+-- Query table at specific timestamp
+SELECT * FROM ducklake.orders AT (TIMESTAMP => '2024-01-01 12:00:00');
+
+-- Query using timestamp expression
+SELECT * FROM ducklake.orders AT (TIMESTAMP => NOW() - INTERVAL '1 hour');
+
+-- Compare versions
+SELECT 'added' as change_type, * FROM ducklake.orders AT (VERSION => 10)
+EXCEPT
+SELECT 'added', * FROM ducklake.orders AT (VERSION => 9)
+UNION ALL
+SELECT 'removed', * FROM ducklake.orders AT (VERSION => 9)
+EXCEPT  
+SELECT 'removed', * FROM ducklake.orders AT (VERSION => 10);
+```
+
+### Time Travel with Joins
+
+```sql
+-- Join historical versions
+SELECT o.*, c.name
+FROM ducklake.orders AT (VERSION => 5) o
+JOIN ducklake.customers AT (VERSION => 5) c ON o.customer_id = c.id;
+
+-- Mix current and historical
+SELECT o.*, c.name
+FROM ducklake.orders o  -- Current version
+JOIN ducklake.customers AT (TIMESTAMP => '2024-01-01') c 
+ON o.customer_id = c.id;
+```
+
+### Restore Data
+
+```sql
+-- Restore deleted records
+INSERT INTO ducklake.users
+SELECT * FROM ducklake.users AT (VERSION => 10)
+WHERE id NOT IN (SELECT id FROM ducklake.users);
+
+-- Restore entire table state
+CREATE TABLE ducklake.users_restored AS
+SELECT * FROM ducklake.users AT (TIMESTAMP => '2024-01-01');
+```
+
+## Partitioning
+
+### Creating Partitioned Tables
+
+```sql
+-- Create and partition in one statement
+CREATE TABLE ducklake.events (
+    event_id INTEGER,
+    event_date DATE,
+    event_type VARCHAR,
+    data JSON
+);
+ALTER TABLE ducklake.events SET PARTITIONED BY (event_date);
+
+-- Partition by multiple columns
+ALTER TABLE ducklake.events SET PARTITIONED BY (event_date, event_type);
+
+-- Partition existing table
+ALTER TABLE ducklake.sales SET PARTITIONED BY (year, month);
+```
+
+### Partitioning Best Practices
+
+```sql
+-- Good: Low cardinality columns
+ALTER TABLE ducklake.sales SET PARTITIONED BY (year, month);
+
+-- Good: Columns frequently used in WHERE clauses
+ALTER TABLE ducklake.logs SET PARTITIONED BY (log_date);
+
+-- Avoid: High cardinality columns
+-- Don't do: ALTER TABLE orders SET PARTITIONED BY (order_id);
+```
+
+### Querying Partitioned Tables
+
+```sql
+-- Partition pruning happens automatically
+SELECT * FROM ducklake.events 
+WHERE event_date = '2024-01-01';  -- Only reads relevant partition
+
+-- Check partition pruning
+EXPLAIN SELECT * FROM ducklake.events 
+WHERE event_date BETWEEN '2024-01-01' AND '2024-01-31';
+```
+
+## Change Data Feed
+
+### Table Changes Function
+
+```sql
+-- View all changes between snapshots
+FROM ducklake.table_changes('orders', 0, 10);
+
+-- Filter by change type
+FROM ducklake.table_changes('orders', 0, 10)
+WHERE change_type = 'insert';
+
+-- Group changes by type
+SELECT change_type, COUNT(*) as count
+FROM ducklake.table_changes('orders', 0, 10)
+GROUP BY change_type;
+```
+
+### Change Types
+
+- **insert**: New row added
+- **delete**: Row deleted
+- **update_preimage**: Row state before update
+- **update_postimage**: Row state after update
+
+### CDC Pipeline Example
+
+```sql
+-- Create staging table for CDC
+CREATE TABLE staging.order_changes AS
+FROM ducklake.table_changes('orders', 
+    (SELECT MAX(snapshot_id) FROM staging.processed_snapshots),
+    (SELECT MAX(snapshot_id) FROM ducklake_snapshots('ducklake'))
+);
+
+-- Process changes
+INSERT INTO warehouse.orders_fact
+SELECT * FROM staging.order_changes 
+WHERE change_type = 'insert';
+
+-- Update processed snapshots
+INSERT INTO staging.processed_snapshots
+SELECT MAX(snapshot_id) FROM staging.order_changes;
+```
+
+## Performance Optimization
+
+### File Compaction
+
+```sql
+-- Manual compaction
+SELECT * FROM ducklake_merge_adjacent_files('ducklake');
+
+-- Check file sizes before compaction
+SELECT 
+    table_name,
+    file_count,
+    file_size_bytes / file_count / 1024.0 / 1024.0 as avg_file_size_mb
+FROM ducklake_table_info('ducklake')
+WHERE file_count > 0
+ORDER BY avg_file_size_mb ASC;
+```
+
+### Statistics
+
+```sql
+-- View table statistics
+SELECT * FROM ducklake.ducklake_table_stats
+WHERE table_id = (
+    SELECT table_id FROM ducklake.ducklake_table 
+    WHERE table_name = 'orders'
+);
+
+-- View column statistics
+SELECT * FROM ducklake.ducklake_table_column_stats
+WHERE table_id = (
+    SELECT table_id FROM ducklake.ducklake_table 
+    WHERE table_name = 'orders'
+);
+```
+
+### Query Optimization
+
+```sql
+-- Use partition columns in WHERE clause
+SELECT * FROM ducklake.sales 
+WHERE year = 2024 AND month = 1;  -- Partition pruning
+
+-- Use column statistics for filtering
+SELECT * FROM ducklake.orders 
+WHERE order_date >= '2024-01-01';  -- Min/max pruning
+
+-- Avoid SELECT *
+SELECT order_id, customer_id, total 
+FROM ducklake.orders;  -- Column pruning
+```
+
+### Virtual Columns
+
+```sql
+-- Use virtual columns for debugging
+SELECT 
+    *,
+    filename,
+    file_row_number,
+    snapshot_id
+FROM ducklake.orders
+LIMIT 10;
+
+-- Find data distribution
+SELECT 
+    filename,
+    COUNT(*) as row_count
+FROM ducklake.orders
+GROUP BY filename
+ORDER BY row_count DESC;
+```
+
+## Troubleshooting
+
+### Common Issues
+
+#### 1. Transaction Conflicts
+```sql
+-- Check for concurrent modifications
+SELECT * FROM ducklake_snapshots('ducklake')
+ORDER BY snapshot_id DESC
+LIMIT 10;
+
+-- Retry with conflict resolution
+BEGIN;
+-- Add retry logic in application
+UPDATE ducklake.inventory SET quantity = quantity - 1 
+WHERE product_id = 123 AND quantity > 0;
+COMMIT;
+```
+
+#### 2. Slow Queries
+```sql
+-- Check file counts
+SELECT table_name, file_count 
+FROM ducklake_table_info('ducklake')
+WHERE file_count > 1000;
+
+-- Trigger compaction
+SELECT * FROM ducklake_merge_adjacent_files('ducklake');
+
+-- Check partition effectiveness
+EXPLAIN ANALYZE 
+SELECT * FROM ducklake.events 
+WHERE event_date = '2024-01-01';
+```
+
+#### 3. Storage Issues
+```sql
+-- Find large tables
+SELECT 
+    table_name,
+    file_size_bytes / (1024.0 * 1024 * 1024) as size_gb,
+    delete_file_size_bytes / (1024.0 * 1024 * 1024) as delete_size_gb
+FROM ducklake_table_info('ducklake')
+ORDER BY file_size_bytes DESC;
+
+-- Cleanup old snapshots
+CALL ducklake_expire_snapshots('ducklake', 
+    older_than => NOW() - INTERVAL '30 days');
+
+-- Cleanup orphaned files
+CALL ducklake_cleanup_old_files('ducklake', cleanup_all => true);
+```
+
+### Debugging Queries
+
+```sql
+-- Enable profiling
+PRAGMA enable_profiling;
+PRAGMA profiling_mode = 'detailed';
+
+-- Run query
+SELECT * FROM ducklake.large_table WHERE condition;
+
+-- View profile
+SELECT * FROM duckdb_profiling();
+```
+
+## Code Examples
+
+### Python Integration
+
+```python
+import duckdb
+
+# Connect and load extension
+con = duckdb.connect()
+con.install_extension('ducklake')
+con.load_extension('ducklake')
+
+# Attach DuckLake database
+con.execute("""
+    ATTACH 'ducklake:/path/to/metadata.db' AS lake (
+        DATA_PATH '/path/to/data/'
+    )
+""")
+
+# Create table
+con.execute("""
+    CREATE TABLE lake.events (
+        event_id INTEGER,
+        event_type VARCHAR,
+        event_data JSON,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+""")
+
+# Insert data
+import pandas as pd
+df = pd.DataFrame({
+    'event_id': [1, 2, 3],
+    'event_type': ['click', 'view', 'purchase'],
+    'event_data': ['{"page": "home"}', '{"item": "123"}', '{"amount": 99.99}']
+})
+con.execute("INSERT INTO lake.events SELECT * FROM df")
+
+# Query with time travel
+result = con.execute("""
+    SELECT * FROM lake.events AT (VERSION => 1)
+""").fetchdf()
+
+# Change data feed
+changes = con.execute("""
+    FROM lake.table_changes('events', 0, 10)
+""").fetchdf()
+
+# Cleanup
+con.execute("CALL ducklake_expire_snapshots('lake', older_than => NOW() - INTERVAL '7 days')")
+con.close()
+```
+
+### Java/JDBC Integration
+
+```java
+import java.sql.*;
+import java.util.Properties;
+
+public class DuckLakeExample {
+    public static void main(String[] args) throws SQLException {
+        // Connection properties
+        Properties props = new Properties();
+        props.setProperty("duckdb.extensions.autoload", "false");
+        
+        // Connect to DuckDB
+        try (Connection conn = DriverManager.getConnection("jdbc:duckdb:", props)) {
+            Statement stmt = conn.createStatement();
+            
+            // Load DuckLake extension
+            stmt.execute("INSTALL ducklake");
+            stmt.execute("LOAD ducklake");
+            
+            // Attach DuckLake database
+            stmt.execute("""
+                ATTACH 'ducklake:/path/to/metadata.db' AS lake (
+                    DATA_PATH '/path/to/data/'
+                )
+            """);
+            
+            // Create partitioned table
+            stmt.execute("""
+                CREATE TABLE lake.sales (
+                    sale_id INTEGER,
+                    product_id INTEGER,
+                    amount DECIMAL(10,2),
+                    sale_date DATE
+                )
+            """);
+            stmt.execute("ALTER TABLE lake.sales SET PARTITIONED BY (sale_date)");
+            
+            // Batch insert
+            PreparedStatement pstmt = conn.prepareStatement(
+                "INSERT INTO lake.sales VALUES (?, ?, ?, ?)"
+            );
+            
+            for (int i = 0; i < 1000; i++) {
+                pstmt.setInt(1, i);
+                pstmt.setInt(2, i % 100);
+                pstmt.setBigDecimal(3, new BigDecimal("99.99"));
+                pstmt.setDate(4, Date.valueOf("2024-01-01"));
+                pstmt.addBatch();
+            }
+            pstmt.executeBatch();
+            
+            // Query with partition pruning
+            ResultSet rs = stmt.executeQuery("""
+                SELECT SUM(amount) as total
+                FROM lake.sales
+                WHERE sale_date = '2024-01-01'
+            """);
+            
+            while (rs.next()) {
+                System.out.println("Total sales: " + rs.getBigDecimal("total"));
+            }
+            
+            // Time travel query
+            rs = stmt.executeQuery("""
+                SELECT COUNT(*) as count
+                FROM lake.sales AT (VERSION => 1)
+            """);
+            
+            while (rs.next()) {
+                System.out.println("Count at version 1: " + rs.getInt("count"));
+            }
+        }
+    }
+}
+```
+
+### Node.js Integration
+
+```javascript
+const duckdb = require('duckdb');
+
+// Create database connection
+const db = new duckdb.Database(':memory:');
+const conn = db.connect();
+
+// Load DuckLake extension
+conn.run("INSTALL ducklake");
+conn.run("LOAD ducklake");
+
+// Attach DuckLake database
+conn.run(`
+    ATTACH 'ducklake:/path/to/metadata.db' AS lake (
+        DATA_PATH '/path/to/data/'
+    )
+`);
+
+// Create table with schema evolution
+conn.run(`
+    CREATE TABLE lake.users (
+        id INTEGER NOT NULL,
+        username VARCHAR,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+`);
+
+// Insert data
+const stmt = conn.prepare("INSERT INTO lake.users (id, username) VALUES (?, ?)");
+for (let i = 1; i <= 100; i++) {
+    stmt.run(i, `user${i}`);
+}
+stmt.finalize();
+
+// Add column (schema evolution)
+conn.run("ALTER TABLE lake.users ADD COLUMN email VARCHAR");
+
+// Update with new column
+conn.run("UPDATE lake.users SET email = username || '@example.com'");
+
+// Query with time travel
+conn.all(`
+    SELECT * FROM lake.users AT (VERSION => 1)
+    LIMIT 5
+`, (err, res) => {
+    if (err) throw err;
+    console.log('Users at version 1:', res);
+});
+
+// View changes
+conn.all(`
+    FROM lake.table_changes('users', 0, 10)
+    WHERE change_type = 'update_postimage'
+    LIMIT 5
+`, (err, res) => {
+    if (err) throw err;
+    console.log('Updated records:', res);
+});
+
+// Cleanup and maintenance
+conn.run("CALL ducklake_expire_snapshots('lake', older_than => NOW() - INTERVAL '7 days')");
+conn.run("SELECT * FROM ducklake_merge_adjacent_files('lake')");
+
+// Close connection
+conn.close();
+db.close();
+```
+
+### Data Migration Example
+
+```sql
+-- Migrate from regular DuckDB table to DuckLake
+BEGIN;
+
+-- Create DuckLake table with same structure
+CREATE TABLE ducklake.customers AS 
+SELECT * FROM postgres.customers WHERE 1=0;
+
+-- Copy data in batches
+INSERT INTO ducklake.customers 
+SELECT * FROM postgres.customers 
+ORDER BY customer_id
+LIMIT 100000;
+
+-- Add partitioning
+ALTER TABLE ducklake.customers SET PARTITIONED BY (country);
+
+-- Verify migration
+SELECT COUNT(*) FROM ducklake.customers;
+SELECT COUNT(*) FROM postgres.customers;
+
+COMMIT;
+```
+
+### ETL Pipeline Example
+
+```sql
+-- Daily ETL job
+CREATE OR REPLACE MACRO process_daily_data(target_date) AS (
+    BEGIN;
+    
+    -- Load new data
+    INSERT INTO ducklake.fact_sales
+    SELECT 
+        s.*,
+        CURRENT_TIMESTAMP as etl_timestamp
+    FROM staging.daily_sales s
+    WHERE s.sale_date = target_date;
+    
+    -- Update dimensions
+    UPDATE ducklake.dim_product p
+    SET 
+        current_price = s.price,
+        last_updated = CURRENT_TIMESTAMP
+    FROM staging.product_updates s
+    WHERE p.product_id = s.product_id
+    AND s.update_date = target_date;
+    
+    -- Mark processed
+    INSERT INTO ducklake.etl_log VALUES (
+        target_date,
+        'daily_sales',
+        CURRENT_TIMESTAMP,
+        'completed'
+    );
+    
+    COMMIT;
+);
+
+-- Run ETL
+CALL process_daily_data('2024-01-15');
+```
+
+## Best Practices
+
+### 1. Table Design
+- Use appropriate data types (avoid unnecessary VARCHAR for numeric data)
+- Partition large tables by commonly filtered columns
+- Consider data inlining for small reference tables
+- Use NOT NULL constraints where appropriate
+
+### 2. Transaction Management
+- Keep transactions as short as possible
+- Use explicit BEGIN/COMMIT for multi-statement transactions
+- Handle conflicts with retry logic
+- Use READ ONLY transactions for analytics queries
+
+### 3. Performance
+- Regularly compact small files
+- Expire old snapshots to reduce metadata size
+- Use partition pruning in queries
+- Leverage column statistics for query optimization
+
+### 4. Maintenance
+- Schedule regular snapshot expiration
+- Monitor file counts and trigger compaction
+- Clean up orphaned files after snapshot expiration
+- Back up metadata catalog regularly
+
+### 5. Schema Evolution
+- Plan schema changes carefully
+- Use IF EXISTS/IF NOT EXISTS clauses
+- Document schema versions
+- Test schema changes on development databases first
+
+This comprehensive documentation covers all aspects of DuckLake, from basic usage to advanced features and optimization techniques. Use it as a reference for developing applications with DuckLake.
